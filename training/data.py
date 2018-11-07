@@ -280,7 +280,7 @@ class EqaDataset(Dataset):
                     objrender.RenderAPIThread(
                         w=224, h=224, device=self.gpu_id))
 
-        self.cfg = load_config('../House3D/tests/config.json')
+        self.cfg = load_config('../../House3D/tests/config.json')
 
         print('[%.02f] Loaded %d api threads' % (time.time() - start,
                                                  len(self.api_threads)))

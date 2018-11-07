@@ -26,7 +26,9 @@ from models import MaskedNLLCriterion
 from models import get_state, repackage_hidden, ensure_shared_grads
 from data import load_vocab, flat_to_hierarchical_actions
 
-def eval(rank, args, shared_model):
+
+def eval(rank, args, shared_model,
+         use_vision, use_language):
 
     torch.cuda.set_device(args.gpus.index(args.gpus[rank % len(args.gpus)]))
 
@@ -63,6 +65,7 @@ def eval(rank, args, shared_model):
     t, epoch, best_eval_acc = 0, 0, 0.0
 
     while epoch < int(args.max_epochs):
+        print("eval " + str(rank) + " running epoch " + str(epoch))
 
         start_time = time.time()
         invalids = []
@@ -97,6 +100,13 @@ def eval(rank, args, shared_model):
                     idx, question, answer, actions, action_length = batch
                     metrics_slug = {}
 
+                    # If not using language, replace each question with a start and end token back to back.
+                    if not use_language:
+                        questions = torch.zeros_like(questions)
+                        questions.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
+                        questions[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
+                        questions[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
+
                     h3d = eval_loader.dataset.episode_house
 
                     # evaluate at multiple initializations
@@ -116,6 +126,11 @@ def eval(rank, args, shared_model):
                         # forward through planner till spawn
                         planner_actions_in, planner_img_feats, controller_step, controller_action_in, controller_img_feat, init_pos = eval_loader.dataset.get_hierarchical_features_till_spawn(
                             actions[0, :action_length[0] + 1].numpy(), i)
+
+                        # If not using vision, replace all image feature data with zeros.
+                        if not use_vision:
+                            planner_img_feats = torch.zeros_like(planner_img_feats)
+                            controller_img_feat = torch.zeros_like(controller_img_feat)
 
                         planner_actions_in_var = Variable(
                             planner_actions_in.cuda())
@@ -331,7 +346,8 @@ def eval(rank, args, shared_model):
         eval_loader.dataset._load_envs(start_idx=0, in_order=True)
 
 
-def train(rank, args, shared_model):
+def train(rank, args, shared_model,
+          use_vision, use_language):
     torch.cuda.set_device(args.gpus.index(args.gpus[rank % len(args.gpus)]))
 
     if args.model_type == 'pacman':
@@ -388,6 +404,7 @@ def train(rank, args, shared_model):
     t, epoch = 0, 0
 
     while epoch < int(args.max_epochs):
+        print("train " + str(rank) + " running epoch " + str(epoch))
 
         if 'pacman' in args.model_type:
 
@@ -411,6 +428,17 @@ def train(rank, args, shared_model):
                         planner_actions_out, planner_action_lengths, planner_masks, \
                         controller_img_feats, controller_actions_in, planner_hidden_idx, \
                         controller_outs, controller_action_lengths, controller_masks = batch
+
+                    # If not using language, replace each question with a start and end token back to back.
+                    if not use_language:
+                        questions = torch.zeros_like(questions)
+                        questions.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
+                        questions[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
+                        questions[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
+                    # If not using vision, replace all image feature data with zeros.
+                    if not use_vision:
+                        planner_img_feats = torch.zeros_like(planner_img_feats)
+                        controller_img_feats = torch.zeros_like(controller_img_feats)
 
                     questions_var = Variable(questions.cuda())
 
@@ -524,7 +552,7 @@ if __name__ == '__main__':
 
     parser.add_argument(
         '-target_obj_conn_map_dir',
-        default='/path/to/target-obj-conn-maps/500')
+        default='/hdd/jdtho/eqa/500')
     parser.add_argument('-map_resolution', default=500, type=int)
 
     parser.add_argument(
@@ -559,6 +587,11 @@ if __name__ == '__main__':
     parser.add_argument('-log_dir', default='logs/nav/')
     parser.add_argument('-to_log', default=0, type=int)
     parser.add_argument('-to_cache', action='store_true')
+
+    # added for bias-exploiting baselines
+    parser.add_argument('-use_vision', type=int, required=False)
+    parser.add_argument('-use_language', type=int, required=False)
+
     args = parser.parse_args()
 
     args.time_id = time.strftime("%m_%d_%H:%M")
@@ -608,28 +641,31 @@ if __name__ == '__main__':
 
     shared_model.share_memory()
 
+    use_vision = False if args.use_vision == 0 else True
+    use_language = False if args.use_language == 0 else True
+
     if args.checkpoint_path != False:
         print('Loading params from checkpoint: %s' % args.checkpoint_path)
         shared_model.load_state_dict(checkpoint['state'])
 
     if args.mode == 'eval':
 
-        eval(0, args, shared_model)
+        eval(0, args, shared_model, use_vision, use_language)
 
     elif args.mode == 'train':
 
-        train(0, args, shared_model)
+        train(0, args, shared_model, use_vision, use_language)
 
     else:
 
         processes = []
 
-        p = mp.Process(target=eval, args=(0, args, shared_model))
+        p = mp.Process(target=eval, args=(0, args, shared_model, use_vision, use_language))
         p.start()
         processes.append(p)
 
         for rank in range(1, args.num_processes + 1):
-            p = mp.Process(target=train, args=(rank, args, shared_model))
+            p = mp.Process(target=train, args=(rank, args, shared_model, use_vision, use_language))
             p.start()
             processes.append(p)
 

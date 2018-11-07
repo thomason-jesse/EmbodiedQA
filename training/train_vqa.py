@@ -25,9 +25,12 @@ from data import load_vocab
 import pdb
 
 
-def eval(rank, args, shared_model):
+def eval(rank, args, shared_model,
+         use_vision, use_language):
 
-    torch.cuda.set_device(args.gpus.index(args.gpus[rank % len(args.gpus)]))
+    gpu_idx = args.gpus.index(args.gpus[rank % len(args.gpus)])
+    torch.cuda.set_device(gpu_idx)
+    print("eval gpu:" + str(gpu_idx) + " assigned")
 
     if args.input_type == 'ques':
 
@@ -62,7 +65,9 @@ def eval(rank, args, shared_model):
 
     t, epoch, best_eval_acc = 0, 0, 0
 
+    print(epoch, args.max_epochs)  # DEBUG
     while epoch < int(args.max_epochs):
+        print("eval gpu:" + str(gpu_idx) + " running epoch " + str(epoch))
 
         model.load_state_dict(shared_model.state_dict())
         model.eval()
@@ -81,6 +86,13 @@ def eval(rank, args, shared_model):
                 model.cuda()
 
                 idx, questions, answers = batch
+
+                # If not using language, replace each question with a start and end token back to back.
+                if not use_language:
+                    questions = torch.zeros_like(questions)
+                    questions.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
+                    questions[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
+                    questions[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
 
                 questions_var = Variable(questions.cuda())
                 answers_var = Variable(answers.cuda())
@@ -107,6 +119,17 @@ def eval(rank, args, shared_model):
 
                     idx, questions, answers, images, _, _, _ = batch
 
+                    # If not using language, replace each question with a start and end token back to back.
+                    if not use_language:
+                        questions = torch.zeros_like(questions)
+                        questions.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
+                        questions[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
+                        questions[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
+                    # If not using vision, replace all image feature data with zeros.
+                    if not use_vision:
+                        images = torch.zeros_like(images)
+                        pass
+
                     questions_var = Variable(questions.cuda())
                     answers_var = Variable(answers.cuda())
                     images_var = Variable(images.cuda())
@@ -129,7 +152,17 @@ def eval(rank, args, shared_model):
                 else:
                     done = True
 
-        epoch += 1
+        read_epoch = None
+        while read_epoch is None or epoch >= read_epoch:
+            try:
+                with open('shared_epoch.tmp', 'r') as f:
+                    read_epoch = int(f.read().strip())
+            except (IOError, ValueError):
+                pass
+            if read_epoch is None:
+                print("eval gpu:" + str(gpu_idx) + " waiting for train thread to finish epoch " + str(epoch))
+                time.sleep(10)  # sleep until the training thread finishes another iteration
+        epoch = read_epoch
 
         # checkpoint if best val accuracy
         if metrics.metrics[1][0] > best_eval_acc:
@@ -154,9 +187,12 @@ def eval(rank, args, shared_model):
         print('[best_eval_accuracy:%.04f]' % best_eval_acc)
 
 
-def train(rank, args, shared_model):
+def train(rank, args, shared_model,
+          use_vision, use_language):
 
-    torch.cuda.set_device(args.gpus.index(args.gpus[rank % len(args.gpus)]))
+    gpu_idx = args.gpus.index(args.gpus[rank % len(args.gpus)])
+    torch.cuda.set_device(gpu_idx)
+    print("train gpu:" + str(gpu_idx) + " assigned")
 
     if args.input_type == 'ques':
 
@@ -195,7 +231,6 @@ def train(rank, args, shared_model):
               'thread': rank},
         metric_names=['loss', 'accuracy', 'mean_rank', 'mean_reciprocal_rank'],
         log_json=args.output_log_path)
-
     train_loader = EqaDataLoader(**train_loader_kwargs)
     if args.input_type == 'ques,image':
         train_loader.dataset._load_envs(start_idx=0, in_order=True)
@@ -205,6 +240,7 @@ def train(rank, args, shared_model):
     t, epoch = 0, 0
 
     while epoch < int(args.max_epochs):
+        print("train gpu:" + str(gpu_idx) + " running epoch " + str(epoch))
 
         if args.input_type == 'ques':
 
@@ -217,6 +253,13 @@ def train(rank, args, shared_model):
                 model.cuda()
 
                 idx, questions, answers = batch
+
+                # If not using language, replace each question with a start and end token back to back.
+                if not use_language:
+                    questions = torch.zeros_like(questions)
+                    questions.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
+                    questions[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
+                    questions[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
 
                 questions_var = Variable(questions.cuda())
                 answers_var = Variable(answers.cuda())
@@ -259,6 +302,16 @@ def train(rank, args, shared_model):
 
                     idx, questions, answers, images, _, _, _ = batch
 
+                    # If not using language, replace each question with a start and end token back to back.
+                    if not use_language:
+                        questions = torch.zeros_like(questions)
+                        questions.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
+                        questions[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
+                        questions[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
+                    # If not using vision, replace all image feature data with zeros.
+                    if not use_vision:
+                        images = torch.zeros_like(images)
+
                     questions_var = Variable(questions.cuda())
                     answers_var = Variable(answers.cuda())
                     images_var = Variable(images.cuda())
@@ -290,6 +343,10 @@ def train(rank, args, shared_model):
                         done = True
                 else:
                     done = True
+
+        # Set shared epoch when it finishes on the training side
+        with open('shared_epoch.tmp', 'w') as f:
+            f.write(str(epoch))
 
         epoch += 1
 
@@ -334,6 +391,11 @@ if __name__ == '__main__':
     parser.add_argument('-log_dir', default='logs/vqa/')
     parser.add_argument('-to_log', default=0, type=int)
     parser.add_argument('-to_cache', default=True, type=bool)
+
+    # added for bias-exploiting baselines
+    parser.add_argument('-use_vision', type=int, required=False)
+    parser.add_argument('-use_language', type=int, required=False)
+
     args = parser.parse_args()
 
     args.time_id = time.strftime("%m_%d_%H:%M")
@@ -385,22 +447,32 @@ if __name__ == '__main__':
 
     shared_model.share_memory()
 
+    use_vision = False if args.use_vision == 0 else True
+    use_language = False if args.use_language == 0 else True
+
     if args.mode == 'eval':
 
-        eval(0, args, shared_model)
+        eval(0, args, shared_model,
+             use_vision, use_language)
 
     else:
 
         processes = []
 
+        os.system('rm shared_epoch.tmp')
+
         # Start the eval thread
-        p = mp.Process(target=eval, args=(0, args, shared_model))
+        print("Launching eval thread...")
+        p = mp.Process(target=eval, args=(0, args, shared_model,
+                                          use_vision, use_language))
         p.start()
         processes.append(p)
 
         # Start the training thread(s)
         for rank in range(1, args.num_processes + 1):
-            p = mp.Process(target=train, args=(rank, args, shared_model))
+            print("Launching training thread...")
+            p = mp.Process(target=train, args=(rank, args, shared_model,
+                                               use_vision, use_language))
             p.start()
             processes.append(p)
 

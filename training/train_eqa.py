@@ -26,7 +26,7 @@ from models import MaskedNLLCriterion
 from models import get_state, repackage_hidden, ensure_shared_grads
 from data import load_vocab, flat_to_hierarchical_actions
 
-def eval(rank, args, shared_nav_model, shared_ans_model):
+def eval(rank, args, shared_nav_model, shared_ans_model, use_vision, use_language):
 
     torch.cuda.set_device(args.gpus.index(args.gpus[rank % len(args.gpus)]))
 
@@ -117,6 +117,13 @@ def eval(rank, args, shared_nav_model, shared_ans_model):
                     idx, question, answer, actions, action_length = batch
                     metrics_slug = {}
 
+                    # If not using language, replace each question with a start and end token back to back.
+                    if not use_language:
+                        question = torch.zeros_like(question)
+                        question.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
+                        question[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
+                        question[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
+
                     h3d = eval_loader.dataset.episode_house
 
                     # evaluate at multiple initializations
@@ -137,6 +144,11 @@ def eval(rank, args, shared_nav_model, shared_ans_model):
                         # forward through planner till spawn
                         planner_actions_in, planner_img_feats, controller_step, controller_action_in, controller_img_feat, init_pos = eval_loader.dataset.get_hierarchical_features_till_spawn(
                             actions[0, :action_length[0] + 1].numpy(), i)
+
+                        # If not using vision, replace all image feature data with zeros.
+                        if not use_vision:
+                            planner_img_feats = torch.zeros_like(planner_img_feats)
+                            controller_img_feat = torch.zeros_like(controller_img_feat)
 
                         planner_actions_in_var = Variable(
                             planner_actions_in.cuda())
@@ -209,6 +221,11 @@ def eval(rank, args, shared_nav_model, shared_ans_model):
                             img, _, _ = h3d.step(action)
                             img = torch.from_numpy(img.transpose(
                                 2, 0, 1)).float() / 255.0
+
+                            # If not using vision, replace all image feature data with zeros.
+                            if not use_vision:
+                                img = torch.zeros_like(img)
+
                             img_feat_var = eval_loader.dataset.cnn(
                                 Variable(img.view(1, 3, 224,
                                                   224).cuda())).view(
@@ -235,6 +252,11 @@ def eval(rank, args, shared_nav_model, shared_ans_model):
 
                                 img = torch.from_numpy(img.transpose(
                                     2, 0, 1)).float() / 255.0
+
+                                # If not using vision, replace all image feature data with zeros.
+                                if not use_vision:
+                                    img = torch.zeros_like(img)
+
                                 img_feat_var = eval_loader.dataset.cnn(
                                     Variable(img.view(1, 3, 224, 224)
                                              .cuda())).view(1, 1, 3200)
@@ -280,6 +302,11 @@ def eval(rank, args, shared_nav_model, shared_ans_model):
                                 pos_queue) - 5:] + pos_queue
                         images = eval_loader.dataset.get_frames(
                             h3d, pos_queue[-5:], preprocess=True)
+
+                        # If not using vision, replace all image feature data with zeros.
+                        if not use_vision:
+                            images = torch.zeros_like(images)
+
                         images_var = Variable(
                             torch.from_numpy(images).cuda()).view(
                                 1, 5, 3, 224, 224)
@@ -393,7 +420,7 @@ def eval(rank, args, shared_nav_model, shared_ans_model):
         eval_loader.dataset._load_envs(start_idx=0, in_order=True)
 
 
-def train(rank, args, shared_nav_model, shared_ans_model):
+def train(rank, args, shared_nav_model, shared_ans_model, use_vision, use_language):
 
     torch.cuda.set_device(args.gpus.index(args.gpus[rank % len(args.gpus)]))
 
@@ -486,6 +513,13 @@ def train(rank, args, shared_nav_model, shared_ans_model):
                     idx, question, answer, actions, action_length = batch
                     metrics_slug = {}
 
+                    # If not using language, replace each question with a start and end token back to back.
+                    if not use_language:
+                        question = torch.zeros_like(question)
+                        question.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
+                        question[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
+                        question[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
+
                     h3d = train_loader.dataset.episode_house
 
                     # evaluate at multiple initializations
@@ -502,6 +536,11 @@ def train(rank, args, shared_nav_model, shared_ans_model):
                     planner_actions_in, planner_img_feats, controller_step, controller_action_in, controller_img_feat, init_pos = train_loader.dataset.get_hierarchical_features_till_spawn(
                         actions[0, :action_length[0] + 1].numpy(),
                         max(3, int(mult * action_length[0])))
+
+                    # If not using vision, replace all image feature data with zeros.
+                    if not use_vision:
+                        planner_img_feats = torch.zeros_like(planner_img_feats)
+                        controller_img_feat = torch.zeros_like(controller_img_feat)
 
                     planner_actions_in_var = Variable(
                         planner_actions_in.cuda())
@@ -573,6 +612,11 @@ def train(rank, args, shared_nav_model, shared_ans_model):
                         img, rwd, episode_done = h3d.step(action, step_reward=True)
                         img = torch.from_numpy(img.transpose(
                             2, 0, 1)).float() / 255.0
+
+                        # If not using vision, replace all image feature data with zeros.
+                        if not use_vision:
+                            img = torch.zeros_like(img)
+
                         img_feat_var = train_loader.dataset.cnn(
                             Variable(img.view(1, 3, 224, 224).cuda())).view(
                                 1, 1, 3200)
@@ -608,6 +652,11 @@ def train(rank, args, shared_nav_model, shared_ans_model):
 
                             img = torch.from_numpy(img.transpose(
                                 2, 0, 1)).float() / 255.0
+
+                            # If not using vision, replace all image feature data with zeros.
+                            if not use_vision:
+                                img = torch.zeros_like(img)
+
                             img_feat_var = train_loader.dataset.cnn(
                                 Variable(img.view(1, 3, 224, 224)
                                          .cuda())).view(1, 1, 3200)
@@ -665,6 +714,11 @@ def train(rank, args, shared_nav_model, shared_ans_model):
                                 pos_queue) - 5:] + pos_queue
                         images = train_loader.dataset.get_frames(
                             h3d, pos_queue[-5:], preprocess=True)
+
+                        # If not using vision, replace all image feature data with zeros.
+                        if not use_vision:
+                            images = torch.zeros_like(images)
+
                         images_var = Variable(
                             torch.from_numpy(images).cuda()).view(
                                 1, 5, 3, 224, 224)
@@ -794,6 +848,11 @@ if __name__ == '__main__':
     parser.add_argument('-log_dir', default='logs/eqa/')
     parser.add_argument('-to_log', default=0, type=int)
     parser.add_argument('-to_cache', action='store_true')
+
+    # added for bias-exploiting baselines
+    parser.add_argument('-use_vision', type=int, required=False)
+    parser.add_argument('-use_language', type=int, required=False)
+
     args = parser.parse_args()
 
     args.time_id = time.strftime("%m_%d_%H:%M")
@@ -856,30 +915,33 @@ if __name__ == '__main__':
 
     shared_ans_model.share_memory()
 
+    use_vision = False if args.use_vision == 0 else True
+    use_language = False if args.use_language == 0 else True
+
     print('Loading params from checkpoint: %s' % args.ans_checkpoint_path)
     shared_ans_model.load_state_dict(ans_checkpoint['state'])
 
     if args.mode == 'eval':
 
-        eval(0, args, shared_nav_model, shared_ans_model)
+        eval(0, args, shared_nav_model, shared_ans_model, use_vision, use_language)
 
     elif args.mode == 'train':
 
-        train(0, args, shared_nav_model, shared_ans_model)
+        train(0, args, shared_nav_model, shared_ans_model, use_vision, use_language)
 
     else:
 
         processes = []
 
         p = mp.Process(
-            target=eval, args=(0, args, shared_nav_model, shared_ans_model))
+            target=eval, args=(0, args, shared_nav_model, shared_ans_model, use_vision, use_language))
         p.start()
         processes.append(p)
 
         for rank in range(1, args.num_processes + 1):
             p = mp.Process(
                 target=train,
-                args=(rank, args, shared_nav_model, shared_ans_model))
+                args=(rank, args, shared_nav_model, shared_ans_model, use_vision, use_language))
             p.start()
             processes.append(p)
 
