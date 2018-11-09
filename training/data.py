@@ -23,7 +23,17 @@ from house3d import House3DUtils
 
 from models import MultitaskCNN
 
-import pdb
+# import pdb
+
+
+# Solution from https://github.com/facebookresearch/EmbodiedQA/issues/5 to assertion data loading issue in train_nav
+def my_collate(b):
+    b = list(filter(lambda x: x is not None, b))
+    if len(b) == 0:
+        return None
+    else:
+        return default_collate(b)
+
 
 def load_vocab(path):
     with open(path, 'r') as f:
@@ -100,13 +110,13 @@ def _dataset_to_tensor(dset, mask=None, dtype=np.int64):
 
 def eqaCollateCnn(batch):
     transposed = list(zip(*batch))
-    idx_batch = default_collate(transposed[0])
-    question_batch = default_collate(transposed[1])
-    answer_batch = default_collate(transposed[2])
-    images_batch = default_collate(transposed[3])
-    actions_in_batch = default_collate(transposed[4])
-    actions_out_batch = default_collate(transposed[5])
-    action_lengths_batch = default_collate(transposed[6])
+    idx_batch = my_collate(transposed[0])
+    question_batch = my_collate(transposed[1])
+    answer_batch = my_collate(transposed[2])
+    images_batch = my_collate(transposed[3])
+    actions_in_batch = my_collate(transposed[4])
+    actions_out_batch = my_collate(transposed[5])
+    action_lengths_batch = my_collate(transposed[6])
     return [
         idx_batch, question_batch, answer_batch, images_batch,
         actions_in_batch, actions_out_batch, action_lengths_batch
@@ -115,14 +125,14 @@ def eqaCollateCnn(batch):
 
 def eqaCollateSeq2seq(batch):
     transposed = list(zip(*batch))
-    idx_batch = default_collate(transposed[0])
-    questions_batch = default_collate(transposed[1])
-    answers_batch = default_collate(transposed[2])
-    images_batch = default_collate(transposed[3])
-    actions_in_batch = default_collate(transposed[4])
-    actions_out_batch = default_collate(transposed[5])
-    action_lengths_batch = default_collate(transposed[6])
-    mask_batch = default_collate(transposed[7])
+    idx_batch = my_collate(transposed[0])
+    questions_batch = my_collate(transposed[1])
+    answers_batch = my_collate(transposed[2])
+    images_batch = my_collate(transposed[3])
+    actions_in_batch = my_collate(transposed[4])
+    actions_out_batch = my_collate(transposed[5])
+    action_lengths_batch = my_collate(transposed[6])
+    mask_batch = my_collate(transposed[7])
 
     return [
         idx_batch, questions_batch, answers_batch, images_batch,
@@ -169,15 +179,17 @@ class EqaDataset(Dataset):
         self.to_cache = to_cache
         self.img_data_cache = {}
 
-        print('Reading question data into memory')
+        print('Reading question data into memory from', questions_h5)
         self.idx = _dataset_to_tensor(questions_h5['idx'])
         self.questions = _dataset_to_tensor(questions_h5['questions'])
         self.answers = _dataset_to_tensor(questions_h5['answers'])
         self.actions = _dataset_to_tensor(questions_h5['action_labels'])
         self.action_lengths = _dataset_to_tensor(
             questions_h5['action_lengths'])
+        print('... finished running dataset_to_tensor operations from', questions_h5)
 
         if max_actions: #max actions will allow us to create arrays of a certain length.  Helpful if you only want to train with 10 actions.
+            print('... entering max_actions conditions block from', questions_h5)
             assert isinstance(max_actions, int)
             num_data_items = self.actions.shape[0]
             new_actions = np.zeros((num_data_items, max_actions+2), dtype=np.int64)
@@ -189,7 +201,10 @@ class EqaDataset(Dataset):
             self.actions = torch.LongTensor(new_actions)
             self.action_lengths = torch.LongTensor(new_lengths)
 
+            print('... finished running max_actions conditions block from', questions_h5)
+
         if self.data_json != False:
+            print('... entering data_json false condition block from', questions_h5)
             data = json.load(open(self.data_json, 'r'))
             self.envs = data['envs']
 
@@ -198,15 +213,14 @@ class EqaDataset(Dataset):
             self.env_set = list(set(self.env_list))
             self.env_set.sort()
 
-            if self.overfit == True:
+            if self.overfit:
                 self.env_idx = self.env_idx[:1]
                 self.env_set = self.env_list = [self.envs[x] for x in self.env_idx]
                 print('Trying to overfit to [house %s]' % self.env_set[0])
                 logging.info('Trying to overfit to [house {}]'.format(self.env_set[0]))
 
-            print('Total envs: %d' % len(list(set(self.envs))))
-            print('Envs in %s: %d' % (self.split,
-                                      len(list(set(self.env_idx)))))
+            print(questions_h5, 'Total envs: %d' % len(list(set(self.envs))))
+            print(questions_h5, 'Envs in %s: %d' % (self.split, len(list(set(self.env_idx)))))
 
             if input_type != 'ques':
                 ''''
@@ -233,9 +247,12 @@ class EqaDataset(Dataset):
 
             if max_actions:
                 for i in range(len(self.pos_queue)):
-                    self.pos_queue[i] = self.pos_queue[i][-1*max_actions:] 
+                    self.pos_queue[i] = self.pos_queue[i][-1*max_actions:]
+
+            print('... finished running data_json false condition block from', questions_h5)
 
         if input_type == 'pacman':
+            print('... entering input_type pacman condition block from', questions_h5)
 
             self.planner_actions = self.actions.clone().fill_(0)
             self.controller_actions = self.actions.clone().fill_(-1)
@@ -265,6 +282,10 @@ class EqaDataset(Dataset):
                 self.controller_pos_queue_idx.append(cq_idx)
 
                 self.planner_hidden_idx[i][:len(ca)] = torch.Tensor(ph_idx)
+
+            print('... finished running input_type pacman condition block from', questions_h5)
+
+        print('... finished instantiating EqaDataset from', questions_h5)
 
     def _pick_envs_to_load(self,
                            split='train',
@@ -421,13 +442,25 @@ class EqaDataset(Dataset):
         
         # count how many actions of same type have been encountered pefore starting navigation
         backtrack_controller_steps = actions[1:action_length - backtrack_steps + 1:][::-1]
-        counter = 0 
-        try:
-            if len(backtrack_controller_steps) > 0:
-                while (counter <= self.max_controller_actions) and (backtrack_controller_steps[counter] == backtrack_controller_steps[0]) and (counter <= len(backtrack_controller_steps)):
-                    counter += 1
-        except:
-            import pdb; pdb.set_trace() #If you have breakpoint here, you probably found an error in the logit above to figure out the correct counter step.  Still working on this and checking. 
+        counter = 0
+        # Removed try/except here to try to tease out pdb-related errors in Abhishek's code that are firing in other
+        # parts of training for me as well.
+        # try:
+        if len(backtrack_controller_steps) > 0:
+            # Edited condition: counter <= len(backtrack_controller_steps to strictly less than to avoid out of bounds
+            # error on following loop; unsure what cascading problems that might cause since I don't know the downsteam
+            # logic for how counter is used, but the loop as written was asking for a bug in execution get getting it.
+            # I also reversed the order of the conditions so that the index check is -after- the verification that
+            # counter is within bounds, since otherwise it doesn't fire until after the out of bounds error has
+            # happened (tho, again, maybe this will cause downstream issues if counter is supposed to be allowed to
+            # float up to value len(backtrack_controller_steps) + 1, which is now higher than it can reach).
+            while ((counter <= self.max_controller_actions) and
+                   (counter < len(backtrack_controller_steps)) and
+                   (backtrack_controller_steps[counter] == backtrack_controller_steps[0])):
+                counter += 1
+        # except:
+            # import pdb;
+            # pdb.set_trace() #If you have breakpoint here, you probably found an error in the logit above to figure out the correct counter step.  Still working on this and checking.
 
         target_pos_idx = action_length - backtrack_steps
 
@@ -735,8 +768,8 @@ class EqaDataset(Dataset):
                         all([room['bbox']['max'][i] == bbox_room['box']['max'][i] for i in range(3)]):
                         target_room = room
                         break
-                assert target_obj_id != False
-                assert target_room != False
+                if target_obj_id == False or target_room == False:
+                    return None
                 self.env_loaded[self.env_list[index]].set_target_object(
                     self.env_loaded[self.env_list[index]].objects[
                         target_obj_id], target_room)
@@ -865,7 +898,7 @@ class EqaDataLoader(DataLoader):
         else:
             max_actions = None 
 
-        print('Reading questions from ', questions_h5_path)
+        print('Reading questions from', questions_h5_path)
         with h5py.File(questions_h5_path, 'r') as questions_h5:
             self.dataset = EqaDataset(
                 questions_h5,
@@ -882,8 +915,10 @@ class EqaDataLoader(DataLoader):
                 overfit=overfit,
                 max_controller_actions=max_controller_actions,
                 max_actions=max_actions)
+        print('... done reading questions from', questions_h5_path)
 
         super(EqaDataLoader, self).__init__(self.dataset, **kwargs)
+        self.collate_fn = my_collate
 
     def close(self):
         pass

@@ -38,7 +38,9 @@ except AttributeError:
 def eval(rank, args, shared_model,
          use_vision, use_language):
 
-    torch.cuda.set_device(args.gpus.index(args.gpus[rank % len(args.gpus)]))
+    gpu_idx = args.gpus.index(args.gpus[rank % len(args.gpus)])
+    torch.cuda.set_device(gpu_idx)
+    print("SYNC: eval gpu:" + str(gpu_idx) + " assigned")
 
     if args.model_type == 'cnn':
 
@@ -110,7 +112,22 @@ def eval(rank, args, shared_model,
     t, epoch, best_eval_acc = 0, 0, 0.0
 
     while epoch < int(args.max_epochs):
-        print("eval " + str(rank) + " running epoch " + str(epoch))
+
+        read_epoch = None
+        while read_epoch is None or epoch >= read_epoch:
+            try:
+                with open(args.identifier + '.shared_epoch.tmp', 'r') as f:
+                    read_epoch = int(f.read().strip())
+            except (IOError, ValueError):
+                pass
+            if read_epoch is None or epoch < read_epoch:
+                print("SYNC: eval gpu:" + str(gpu_idx) + " waiting for train thread to finish epoch "
+                      + str(epoch) + " to eval")
+                if read_epoch is not None:
+                    print("SYNC: ... read_epoch is " + str(read_epoch))
+                time.sleep(10)  # sleep until the training thread finishes another iteration
+
+        print("SYNC: eval gpu:" + str(gpu_idx) + " running epoch " + str(epoch))
 
         invalids = []
 
@@ -147,9 +164,9 @@ def eval(rank, args, shared_model,
                     # If not using language, replace each question with a start and end token back to back.
                     if not use_language:
                         questions = torch.zeros_like(questions)
-                        questions.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
-                        questions[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
-                        questions[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
+                        questions.fill_(model_kwargs['question_vocab']['questionTokenToIdx']['<NULL>'])
+                        questions[:, 0] = model_kwargs['question_vocab']['questionTokenToIdx']['<START>']
+                        questions[:, 1] = model_kwargs['question_vocab']['questionTokenToIdx']['<END>']
 
                     h3d = eval_loader.dataset.episode_house
 
@@ -522,6 +539,8 @@ def eval(rank, args, shared_model,
                         log_json=args.output_log_path)
 
                 for batch in tqdm(eval_loader):
+                    if batch is None:  # thrown from data.py but should be caught by custom collate; not for some reason
+                        continue
 
                     model.load_state_dict(shared_model.state_dict())
                     model.cuda()
@@ -745,7 +764,10 @@ def eval(rank, args, shared_model,
 
 def train(rank, args, shared_model,
           use_vision, use_language):
-    torch.cuda.set_device(args.gpus.index(args.gpus[rank % len(args.gpus)]))
+
+    gpu_idx = args.gpus.index(args.gpus[rank % len(args.gpus)])
+    torch.cuda.set_device(gpu_idx)
+    print("SYNC: train gpu:" + str(gpu_idx) + " assigned")
 
     if args.model_type == 'cnn':
 
@@ -840,7 +862,7 @@ def train(rank, args, shared_model,
     t, epoch = 0, 0
 
     while epoch < int(args.max_epochs):
-        print("train " + str(rank) + " running epoch " + str(epoch))
+        print("SYNC: train gpu:" + str(gpu_idx) + " running epoch " + str(epoch))
 
         if 'cnn' in args.model_type:
 
@@ -1029,9 +1051,9 @@ def train(rank, args, shared_model,
                     # If not using language, replace each question with a start and end token back to back.
                     if not use_language:
                         questions = torch.zeros_like(questions)
-                        questions.fill_(model_kwargs['vocab']['questionTokenToIdx']['<NULL>'])
-                        questions[:, 0] = model_kwargs['vocab']['questionTokenToIdx']['<START>']
-                        questions[:, 1] = model_kwargs['vocab']['questionTokenToIdx']['<END>']
+                        questions.fill_(model_kwargs['question_vocab']['questionTokenToIdx']['<NULL>'])
+                        questions[:, 0] = model_kwargs['question_vocab']['questionTokenToIdx']['<START>']
+                        questions[:, 1] = model_kwargs['question_vocab']['questionTokenToIdx']['<END>']
                     # If not using vision, replace all image feature data with zeros.
                     if not use_vision:
                         planner_img_feats = torch.zeros_like(planner_img_feats)
@@ -1143,8 +1165,16 @@ def train(rank, args, shared_model,
                 else:
                     done = True
 
+        # Set shared epoch when it finishes on the training side
+        print("SYNC: train thread finished epoch " + str(epoch) + " and writing to " + args.identifier +
+              ".shared_epoch.tmp")
+        with open(args.identifier + '.shared_epoch.tmp', 'w') as f:
+            f.write(str(epoch))
+
         epoch += 1
 
+        # TODO: is checkpointing training epochs necessary? Seems space wasteful on the disk for our purposes since
+        # TODO: we're not going to reuse them for full eqa pipeline.
         if epoch % args.save_every == 0:
 
             model_state = get_state(model)
@@ -1171,11 +1201,11 @@ def train(rank, args, shared_model,
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # data params
-    parser.add_argument('-train_h5', default='data/05_06/train.h5')
-    parser.add_argument('-val_h5', default='data/05_06/val.h5')
-    parser.add_argument('-test_h5', default='data/05_06/test.h5')
-    parser.add_argument('-data_json', default='data/05_06/data.json')
-    parser.add_argument('-vocab_json', default='data/05_06/vocab.json')
+    parser.add_argument('-train_h5', default='data/train.h5')
+    parser.add_argument('-val_h5', default='data/val.h5')
+    parser.add_argument('-test_h5', default='data/test.h5')
+    parser.add_argument('-data_json', default='data/data.json')
+    parser.add_argument('-vocab_json', default='data/vocab.json')
 
     parser.add_argument(
         '-target_obj_conn_map_dir',
@@ -1214,14 +1244,14 @@ if __name__ == '__main__':
 
     # checkpointing
     parser.add_argument('-checkpoint_path', default=False)
-    parser.add_argument('-checkpoint_dir', default='checkpoints/05_06/nav/')
-    parser.add_argument('-log_dir', default='logs/05_06/nav/')
+    parser.add_argument('-checkpoint_dir', default='checkpoints/nav/')
+    parser.add_argument('-log_dir', default='logs/nav/')
     parser.add_argument('-to_log', default=0, type=int)
     parser.add_argument('-to_cache', action='store_true')
 
     # added for bias-exploiting baselines
-    parser.add_argument('-use_vision', type=int, required=False)
-    parser.add_argument('-use_language', type=int, required=False)
+    parser.add_argument('-use_vision', type=int, required=False, default=1)
+    parser.add_argument('-use_language', type=int, required=False, default=1)
 
     parser.add_argument('-max_controller_actions', type=int, default=5)
     parser.add_argument('-max_actions', type=int)
@@ -1341,6 +1371,9 @@ if __name__ == '__main__':
     else:
         processes = []
 
+        os.system('rm ' + args.identifier + '.shared_epoch.tmp')
+
+        print("SYNC: launching eval thread...")
         p = mp.Process(target=eval, args=(0, args, shared_model, use_vision, use_language))
 
         p.start()
@@ -1349,6 +1382,7 @@ if __name__ == '__main__':
         # Start the training thread(s)
         for rank in range(1, args.num_processes + 1):
 
+            print("SYNC: launching train thread (rank=" + str(rank) + ")...")
             p = mp.Process(target=train, args=(rank, args, shared_model, use_vision, use_language))
 
             p.start()

@@ -22,7 +22,7 @@ from metrics import VqaMetric
 from models import get_state, repackage_hidden, ensure_shared_grads
 from data import load_vocab
 
-import pdb
+# import pdb
 
 
 def eval(rank, args, shared_model,
@@ -128,7 +128,6 @@ def eval(rank, args, shared_model,
                     # If not using vision, replace all image feature data with zeros.
                     if not use_vision:
                         images = torch.zeros_like(images)
-                        pass
 
                     questions_var = Variable(questions.cuda())
                     answers_var = Variable(answers.cuda())
@@ -155,11 +154,13 @@ def eval(rank, args, shared_model,
         read_epoch = None
         while read_epoch is None or epoch >= read_epoch:
             try:
-                with open('shared_epoch.tmp', 'r') as f:
+                with open(args.identifier + '.shared_epoch.tmp', 'r') as f:
                     read_epoch = int(f.read().strip())
             except (IOError, ValueError):
                 pass
             if read_epoch is None:
+                # TODO: since merger, this no longer works (hanging); might need to undo changes re: threading that we
+                # TODO: made or debug them.
                 print("eval gpu:" + str(gpu_idx) + " waiting for train thread to finish epoch " + str(epoch))
                 time.sleep(10)  # sleep until the training thread finishes another iteration
         epoch = read_epoch
@@ -345,7 +346,7 @@ def train(rank, args, shared_model,
                     done = True
 
         # Set shared epoch when it finishes on the training side
-        with open('shared_epoch.tmp', 'w') as f:
+        with open(args.identifier + '.shared_epoch.tmp', 'w') as f:
             f.write(str(epoch))
 
         epoch += 1
@@ -459,7 +460,7 @@ if __name__ == '__main__':
 
         processes = []
 
-        os.system('rm shared_epoch.tmp')
+        os.system('rm ' + args.identifier + '.shared_epoch.tmp')
 
         # Start the eval thread
         print("Launching eval thread...")

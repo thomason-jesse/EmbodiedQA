@@ -193,19 +193,20 @@ if __name__ == '__main__':
 
     # encode questions
     idx, encoded_questions, question_types, answers, action_labels, action_lengths, pos_queue, envs, boxes = [], [], [], [], [], [], [], [], []
+    missing = 0
+    unreadable = 0
     for i, q in enumerate(questions[:args.num_ques]):
 
-        if os.path.exists(
-                os.path.join(args.shortest_path_dir, q['house'] + '_' +
-                             str(q['id']) + '.pkl')) == False:
+        fp = os.path.join(args.shortest_path_dir, q['house'] + '_' + str(q['id']) + '.pkl')
+        if not os.path.exists(os.path.join(fp)):
+            print("WARNING: path '" + fp + "' does not exist")
+            missing += 1
             continue
-        
         try:
-            nav = pkl.load(
-                open(
-                    os.path.join(args.shortest_path_dir, q['house'] + '_' +
-                                 str(q['id']) + '.pkl'), 'rb'))
+            nav = pkl.load(open(fp, 'rb'))
         except:
+            print("WARNING: path '" + fp + "' could not be read")
+            unreadable += 1
             continue 
 
         idx.append(q['id'])
@@ -231,6 +232,8 @@ if __name__ == '__main__':
         assert q['question'] == nav['question']
 
     args.num_ques = len(idx)
+    assert(args.num_ques) > 0
+    print("missing " + str(missing) + "/" + str(len(idx)) + "; unreadable " + str(unreadable) + "/" + str(len(idx)))
     maxALength = max(action_lengths) + 1
 
     action_labels_mat = np.zeros(
