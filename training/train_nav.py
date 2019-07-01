@@ -109,24 +109,40 @@ def eval(rank, args, shared_model,
     args.output_log_path = os.path.join(args.log_dir,
                                         'eval_' + str(rank) + '.json')
 
-    t, epoch, best_eval_acc = 0, 0, 0.0
+    t, epoch = 0, 0
+    metrics_to_checkpoint = ['d_0_10', 'd_0_30', 'd_0_50',  # Used in Neural Modular control https://arxiv.org/pdf/1810.11181.pdf
+                             'd_T_10', 'd_T_30', 'd_T_50',  # Used in NMC + EQA (lower is better)
+                             'd_D_10', 'd_D_30', 'd_D_50',  # Used in NMC + EQA
+                             'd_min_10', 'd_min_30', 'd_min_50',  # Used in EQA https://arxiv.org/pdf/1711.11543.pdf 
+                             'r_T_10', 'r_T_30', 'r_T_50',  # same (and below)
+                             'r_e_10', 'r_e_30', 'r_e_50',
+                             'stop_10', 'stop_30', 'stop_50']
+    metrics_better_dir = ['higher', 'higher', 'higher',
+                          'lower', 'lower', 'lower',
+                          'higher', 'higher', 'higher',
+                          'lower', 'lower', 'lower',
+                          'higher', 'higher', 'higher',
+                          'higher', 'higher', 'higher',
+                          'higher', 'higher', 'higher']
+    best_eval_acc = {m: None for m in metrics_to_checkpoint}
+    checkpoint_path_names = {m: None for m in metrics_to_checkpoint}
 
     while epoch < int(args.max_epochs):
 
         read_epoch = None
         while read_epoch is None or epoch >= read_epoch:
             try:
-                with open(args.identifier + '.shared_epoch.tmp', 'r') as f:
+                with open(args.identifier + '.eval.shared_epoch.tmp', 'r') as f:
                     read_epoch = int(f.read().strip())
-            except (IOError, ValueError):
+            except (IOError, ValueError) as e:
+                print("SYNC: ... eval read_epoch exception '" + str(e) + "'")
                 pass
             if read_epoch is None or epoch < read_epoch:
                 print("SYNC: eval gpu:" + str(gpu_idx) + " waiting for train thread to finish epoch "
                       + str(epoch) + " to eval")
                 if read_epoch is not None:
-                    print("SYNC: ... read_epoch is " + str(read_epoch))
+                    print("SYNC: ... eval read_epoch is " + str(read_epoch))
                 time.sleep(10)  # sleep until the training thread finishes another iteration
-
         print("SYNC: eval gpu:" + str(gpu_idx) + " running epoch " + str(epoch))
 
         invalids = []
@@ -338,6 +354,12 @@ def eval(rank, args, shared_model,
                     question_var = Variable(questions.cuda())
                     metrics_slug = {}
 
+                    if not use_language:
+                        questions = torch.zeros_like(questions)
+                        questions.fill_(model_kwargs['question_vocab']['questionTokenToIdx']['<NULL>'])
+                        questions[:, 0] = model_kwargs['question_vocab']['questionTokenToIdx']['<START>']
+                        questions[:, 1] = model_kwargs['question_vocab']['questionTokenToIdx']['<END>']
+
                     # evaluate at multiple initializations
                     for i in [10, 30, 50]:
 
@@ -529,6 +551,9 @@ def eval(rank, args, shared_model,
                     metrics = NavMetric(
                         info={'split': args.eval_split,
                               'thread': rank},
+                        # EQA paper Table 1 gives summary of d_0_X, d_T_X, d_D_X where D=\Delta and X={10,30,50}.
+                        # TODO: need to read paper close enough to know what these actually mean to present them in our
+                        # TODO: paper's appendix and decide which column to present in main results table.
                         metric_names=[
                             'd_0_10', 'd_0_30', 'd_0_50', 'd_T_10', 'd_T_30', 'd_T_50',
                             'd_D_10', 'd_D_30', 'd_D_50', 'd_min_10', 'd_min_30',
@@ -549,6 +574,12 @@ def eval(rank, args, shared_model,
                     metrics_slug = {}
 
                     h3d = eval_loader.dataset.episode_house
+
+                    if not use_language:
+                        question = torch.zeros_like(question)
+                        question.fill_(model_kwargs['question_vocab']['questionTokenToIdx']['<NULL>'])
+                        question[:, 0] = model_kwargs['question_vocab']['questionTokenToIdx']['<START>']
+                        question[:, 1] = model_kwargs['question_vocab']['questionTokenToIdx']['<END>']
 
                     # evaluate at multiple initializations
                     for i in [10, 30, 50]:
@@ -573,6 +604,11 @@ def eval(rank, args, shared_model,
                         ) = eval_loader.dataset.get_hierarchical_features_till_spawn(
                             actions[0, :action_length[0] + 1].numpy(), i, args.max_controller_actions 
                         )
+
+                        # If not using vision, replace all image feature data with zeros.
+                        if not use_vision:
+                            planner_img_feats = torch.zeros_like(planner_img_feats)
+                            controller_img_feats = torch.zeros_like(controller_img_feats)
 
                         planner_actions_in_var = Variable(
                             planner_actions_in.cuda())
@@ -734,32 +770,48 @@ def eval(rank, args, shared_model,
 
         epoch += 1
 
-        # checkpoint if best val loss
-        if metrics.metrics[8][0] > best_eval_acc:  # d_D_50
-            best_eval_acc = metrics.metrics[8][0]
-            if epoch % args.eval_every == 0 and args.to_log == 1:
-                metrics.dump_log()
+        # Set shared epoch when it finishes on the training side
+        # print("SYNC: eval thread finished epoch " + str(epoch) + " and writing to " + args.identifier +
+        #       ".train.shared_epoch.tmp")
+        # with open(args.identifier + '.train.shared_epoch.tmp', 'w') as f:
+        #     f.write(str(epoch))
+        # print("SYNC: ... eval thread finished writing to " + args.identifier + ".train.shared_epoch.tmp")
 
-                model_state = get_state(model)
+        for mjdx in range(len(metrics_to_checkpoint)):
+            m = metrics_to_checkpoint[mjdx]
+            midx = metrics.metric_names.index(m)
+            if best_eval_acc[m] is None or\
+                    ((metrics_better_dir[mjdx] == 'higher' and metrics.metrics[midx][0] > best_eval_acc[m]) or
+                     (metrics_better_dir[mjdx] == 'lower' and metrics.metrics[midx][0] < best_eval_acc[m])):
+                best_eval_acc[m] = metrics.metrics[midx][0]
+                if epoch % args.eval_every == 0 and args.to_log == 1:
+                    metrics.dump_log()
 
-                aad = dict(args.__dict__)
-                ad = {}
-                for i in aad:
-                    if i[0] != '_':
-                        ad[i] = aad[i]
+                    model_state = get_state(model)
 
-                checkpoint = {'args': ad, 'state': model_state, 'epoch': epoch}
+                    aad = dict(args.__dict__)
+                    ad = {}
+                    for i in aad:
+                        if i[0] != '_':
+                            ad[i] = aad[i]
 
-                checkpoint_path = '%s/epoch_%d_d_D_50_%.04f.pt' % (
-                    args.checkpoint_dir, epoch, best_eval_acc)
-                print('Saving checkpoint to %s' % checkpoint_path)
-                logging.info("EVAL: Saving checkpoint to {}".format(checkpoint_path))
-                torch.save(checkpoint, checkpoint_path)
+                    checkpoint = {'args': ad, 'state': model_state, 'epoch': epoch}
 
-        print('[best_eval_d_D_50:%.04f]' % best_eval_acc)
-        logging.info("EVAL: [best_eval_d_D_50:{.04f}]".format(best_eval_acc))
+                    checkpoint_path = '%s/epoch_%d_%s_%.04f.pt' % (
+                        args.checkpoint_dir, epoch, m, best_eval_acc[m])
+                    print('Saving checkpoint to %s' % checkpoint_path)
+                    logging.info("EVAL: Saving checkpoint to {}".format(checkpoint_path))
+                    torch.save(checkpoint, checkpoint_path)
+                    if checkpoint_path_names[m] is not None:
+                        print('Removing old checkpoint from %s' % checkpoint_path_names[m])
+                        os.system('rm ' + checkpoint_path_names[m])
+                    checkpoint_path_names[m] = checkpoint_path
 
+            print('[best_eval_%s:%.04f]' % (m, best_eval_acc[m]))
+
+        print("SYNC: eval thread calling eval_loader dataset load...")
         eval_loader.dataset._load_envs(start_idx=0, in_order=True)
+        print("SYNC: ... eval thread dataset load done")
 
 
 def train(rank, args, shared_model,
@@ -862,7 +914,21 @@ def train(rank, args, shared_model,
     t, epoch = 0, 0
 
     while epoch < int(args.max_epochs):
-        print("SYNC: train gpu:" + str(gpu_idx) + " running epoch " + str(epoch))
+
+        # read_epoch = None
+        # while read_epoch is None or epoch > read_epoch:
+        #     try:
+        #         with open(args.identifier + '.train.shared_epoch.tmp', 'r') as f:
+        #             read_epoch = int(f.read().strip())
+        #     except (IOError, ValueError):
+        #         pass
+        #     if read_epoch is None or epoch <= read_epoch:
+        #         print("SYNC: train gpu:" + str(gpu_idx) + " waiting for eval thread to finish epoch "
+        #               + str(epoch) + " to train")
+        #         if read_epoch is not None:
+        #             print("SYNC: ... train read_epoch is " + str(read_epoch))
+        #         time.sleep(10)  # sleep until the training thread finishes another iteration
+        # print("SYNC: train gpu:" + str(gpu_idx) + " running epoch " + str(epoch))
 
         if 'cnn' in args.model_type:
 
@@ -880,6 +946,12 @@ def train(rank, args, shared_model,
                     model.cuda()
 
                     idx, questions, _, img_feats, _, actions_out, _ = batch
+
+                    if not use_language:
+                        questions = torch.zeros_like(questions)
+                        questions.fill_(model_kwargs['question_vocab']['questionTokenToIdx']['<NULL>'])
+                        questions[:, 0] = model_kwargs['question_vocab']['questionTokenToIdx']['<START>']
+                        questions[:, 1] = model_kwargs['question_vocab']['questionTokenToIdx']['<END>']
 
                     img_feats_var = Variable(img_feats.cuda())
                     if '+q' in args.model_type:
@@ -947,6 +1019,12 @@ def train(rank, args, shared_model,
                     model.cuda()
 
                     idx, questions, _, img_feats, actions_in, actions_out, action_lengths, masks = batch
+
+                    if not use_language:
+                        questions = torch.zeros_like(questions)
+                        questions.fill_(model_kwargs['question_vocab']['questionTokenToIdx']['<NULL>'])
+                        questions[:, 0] = model_kwargs['question_vocab']['questionTokenToIdx']['<START>']
+                        questions[:, 1] = model_kwargs['question_vocab']['questionTokenToIdx']['<END>']
 
                     img_feats_var = Variable(img_feats.cuda())
                     if '+q' in args.model_type:
@@ -1165,13 +1243,14 @@ def train(rank, args, shared_model,
                 else:
                     done = True
 
+        epoch += 1
+
         # Set shared epoch when it finishes on the training side
         print("SYNC: train thread finished epoch " + str(epoch) + " and writing to " + args.identifier +
-              ".shared_epoch.tmp")
-        with open(args.identifier + '.shared_epoch.tmp', 'w') as f:
+              ".eval.shared_epoch.tmp")
+        with open(args.identifier + '.eval.shared_epoch.tmp', 'w') as f:
             f.write(str(epoch))
-
-        epoch += 1
+        print("SYNC: ... train thread finished writing to " + args.identifier + ".eval.shared_epoch.tmp")
 
         # TODO: is checkpointing training epochs necessary? Seems space wasteful on the disk for our purposes since
         # TODO: we're not going to reuse them for full eqa pipeline.
@@ -1221,6 +1300,7 @@ if __name__ == '__main__':
     parser.add_argument('-eval_split', default='val', type=str)
 
     # model details
+    # TODO: use lstm+q model as baseline.
     parser.add_argument(
         '-model_type',
         default='cnn',
@@ -1231,7 +1311,7 @@ if __name__ == '__main__':
     # optim params
     parser.add_argument('-batch_size', default=20, type=int)
     parser.add_argument('-learning_rate', default=1e-3, type=float)
-    parser.add_argument('-max_epochs', default=1000, type=int)
+    parser.add_argument('-max_epochs', default=100, type=int)
     parser.add_argument('-overfit', default=False, action='store_true')
 
     # bookkeeping
@@ -1371,7 +1451,12 @@ if __name__ == '__main__':
     else:
         processes = []
 
-        os.system('rm ' + args.identifier + '.shared_epoch.tmp')
+        # os.system('rm ' + args.identifier + '.train.shared_epoch.tmp')
+        os.system('rm ' + args.identifier + '.eval.shared_epoch.tmp')
+
+        # Allow training thread to start.
+        # with open(args.identifier + '.train.shared_epoch.tmp', 'w') as f:
+        #     f.write("0")
 
         print("SYNC: launching eval thread...")
         p = mp.Process(target=eval, args=(0, args, shared_model, use_vision, use_language))
